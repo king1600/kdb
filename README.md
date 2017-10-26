@@ -1,2 +1,2 @@
-# kdb
+# King DB
 A basic, concurrent database
