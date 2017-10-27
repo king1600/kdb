@@ -16,10 +16,4 @@ typedef struct {
     unsigned fin : 1;
 } kws_frame_t;
 
-struct kws_client {
-    int fd;
-    kbuf_t buf;
-} __attribute__ ((__packed__));
-typedef kws_client kws_client_t;
-
 #endif // K_WS_H

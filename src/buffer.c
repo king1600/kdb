@@ -11,7 +11,15 @@ typedef struct {
 } kbuf_t;
 
 void kbuf_init(kbuf_t *buf) {
-    memset(buf, 0, sizeof(buf));
+    buf->pos = 0;
+    buf->len = 0;
+    buf->max = 0;
+    buf->data = NULL;
+}
+
+void kbuf_free(kbuf_t *buf) {
+    if (buf->data != NULL)
+        free(buf->data);
 }
 
 int kbuf_read(kbuf_t *buf, void *output, size_t size) {

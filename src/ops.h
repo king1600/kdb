@@ -32,5 +32,8 @@ static const int
 #define K_CMD_REM 4 // DROP
 #define K_CMD_NEW 5 // CREATE
 
+// sub command opcode
+#define K_Q_WHERE 0 // WHERE str(x) comp(op) val(?)
+#define K_Q_LIMIT 1 // LIMIT int(x)
 
 #endif // K_OP_H
