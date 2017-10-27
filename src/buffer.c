@@ -18,8 +18,10 @@ void kbuf_init(kbuf_t *buf) {
 }
 
 void kbuf_free(kbuf_t *buf) {
-    if (buf->data != NULL)
+    if (buf->data != NULL) {
         free(buf->data);
+        buf->data = NULL;
+    }
 }
 
 int kbuf_read(kbuf_t *buf, void *output, size_t size) {
