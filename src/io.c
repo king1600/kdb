@@ -2,14 +2,15 @@
 #include "buffer.h"
 
 // ANSI-C libs
-#include <stdio.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 
 // iso-c/posix libs
-#include <fcntl.h>
+#include <netdb.h>
 #include <unistd.h>
+#include <netinet/tcp.h>
 
 // linux kernel libs
 #include <sys/time.h>
@@ -17,23 +18,19 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 
-uint64_t k_now() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)((tv.tv_sec * 1000) + (tv.tv_usec / 1000));
+static inline uint64_t k_now(struct timeval *tv) {
+    gettimeofday(tv, NULL);
+    return (uint64_t)((tv->tv_sec * 1000) + (tv->tv_usec / 1000));
 }
 
 kio_ctx_t* kio_init(kio_ctx_t *ctx) {
-    // create epoll context
-    ctx->epoll_fd = epoll_create1(0);
-    if (ctx->epoll_fd < 0) return NULL;
-
-    // zero out rest of structure
-    ctx->tasks = NULL;
+    if (ctx == NULL) return NULL;
+    ctx->epoll_fd = -1;
+    ctx->clients = NULL;
     ctx->accept_cb = NULL;
-    memset(ctx->events, 0, sizeof(ctx->events));
-
-    // return initialized context
+    ctx->tasks = NULL;
+    ctx->closed = 0;
+    ctx->client_num = 0;
     return ctx;
 }
 
@@ -46,29 +43,89 @@ void kio_close(kio_client_t *client) {
     // close socket file descriptor
     close(client->fd);
 
+    // call on_close callback
+    if (client->on_close != NULL)
+        ((kio_closecb_t)client->on_close)(client);
+
+    // free read buffer
+    kbuf_free(&client->rbuf);
+
+    // remove from context
+    if (client->ctx != NULL) {
+        kio_client_t *c = (kio_client_t*)client->ctx->clients;
+        if (c != NULL && c->fd == client->fd) {
+            client->ctx->clients = client->next;
+        } else {
+            while (c->next != NULL && ((kio_client_t*)c->next)->fd != client->fd)
+                c = (kio_client_t*)c->next;
+            if (c->next == client)
+                c->next = client->next;
+        }
+        client->ctx->client_num--;
+    }
+
     // free client
     free(client);
     client = NULL;
 }
 
+void kio_free(kio_ctx_t *ctx) {
+    if (ctx == NULL || ctx->closed == 0) return;
+
+    kio_task_t *task, *last_task;
+    kio_client_t *client, *last_client;
+
+    // free client objects
+    client = (kio_client_t*)ctx->clients;
+    while (client != NULL) {
+        last_client = client;
+        client = (kio_client_t*)client->next;
+        if (last_client != NULL)
+            kio_close(last_client);
+    }
+    ctx->clients = NULL;
+    
+    // free task objects
+    task = ctx->tasks;
+    while (task != NULL) {
+        last_task = task;
+        task = (kio_task_t*)task->next;
+        if (last_task != NULL)
+            free(last_task);
+    }
+    ctx->tasks = NULL;
+
+    // set context officially closed
+    ctx->closed = 1;
+    ctx->client_num = 0;
+}
+
 int kio_call(kio_ctx_t *ctx, const uint64_t delay, void *data, kio_callback_t callback) {
-    if (ctx == NULL) return 1;
+    if (ctx == NULL) return -1;
 
     // create task obejct
     kio_task_t *task = malloc(sizeof(kio_task_t));
-    if (task == NULL) return 1;
+    if (task == NULL) {
+        fprintf(stderr, "[KDB] Not enough memory for kio_task!\n");
+        return -1;
+    }
     task->data = data;
     task->next = NULL;
     task->callback = callback;
-    task->delay = k_now() + delay;
+
+    // set expires as current time + ms delay
+    struct timeval tv;
+    task->expires = k_now(&tv) + delay;
 
     // append task to context
-    if (ctx->tasks = NULL) {
+    if (ctx->tasks == NULL) {
+        task->last = NULL;
         ctx->tasks = task;
     } else {
         kio_task_t *t = ctx->tasks;
         while (t->next != NULL)
             t = t->next;
+        task->last = t;
         t->next = task;
     }
 
@@ -100,11 +157,15 @@ void kio_write(kio_client_t *client, const uint8_t *data, const size_t len) {
     }
 }
 
-void kio_read(kio_client_t *client, const uint64_t amount, kio_readcb_t callback) {
-    if (client == NULL) return;
+int kio_read(kio_client_t *client, const uint64_t amount, kio_readcb_t callback) {
+    if (client == NULL) return -1;
 
     // create read task
     kio_rtask_t *task = malloc(sizeof(kio_rtask_t));
+    if (task == NULL) {
+        fprintf(stderr, "[KDB] Not enough memory for read task!\n");
+        return -1;
+    }
     task->next = NULL;
     task->goal = amount;
     task->callback = callback;
@@ -118,6 +179,9 @@ void kio_read(kio_client_t *client, const uint64_t amount, kio_readcb_t callback
             t = t->next;
         t->next = task;
     }
+
+    // successfully created a task
+    return 0;
 }
 
 static inline int kio_non_blocking(int fd) {
@@ -129,53 +193,46 @@ static inline int kio_non_blocking(int fd) {
 }
 
 static int kio_server(const uint16_t port) {
-    int ret, server;
-    struct addrinfo hints;
-    struct addrinfo *result, *addr;
+    int server;
+    struct sockaddr_in addr;
 
-    // set address search hints
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_INET;       // Ipv4
-    hints.ai_flags = AI_PASSIVE;     // All interfaces
-    hints.ai_socktype = SOCK_STREAM; // TCP
-    
-    // get available addresses
-    char sport[5];
-    sprintf(sport, "%d", port);
-    printf("Using port %s\n", sport);
-    ret = getaddrinfo(NULL, sport, &hints, &result);
-    if (ret != 0) {
-        fprintf(stderr, "Failed to fetch available server addresses: %s\n", gai_strerror(ret));
+    // create server socket
+    server = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (server == -1) {
+        fprintf(stderr, "[KDB] Failed to create server socket\n");
         return -1;
     }
 
-    // try to create a server on one of the found addresses
-    for (addr = result; addr != NULL; addr = addr->ai_next) {
-        // create server socket
-        server = socket(addr->ai_family, addr->ai_socktype, addr->ai_protocol);
-        if (server == -1) continue;
-        // bind the server to the address
-        ret = bind(server, addr->ai_addr, addr->ai_addrlen);
-        if (ret == 0) break; // success bind
+    // prepare address for server socket
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+
+    // enable REUSEADDR before binding to fix "Address already in use" error
+    int enable = 1;
+    if (setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(enable)) < 0) {
+        fprintf(stderr, "Failed to set SO_REUSEADDR\n");
         close(server);
+        return -1;
     }
 
-    // check if found a valid address fot the server
-    if (addr == NULL) {
-        fprintf(stderr, "Failed to bind server address\n");
+    // bind the server to the created address
+    if (bind(server, (struct sockaddr*)&addr, sizeof(addr))) {
+        fprintf(stderr, "[KDB] Failed to bind server to address\n");
+        close(server);
         return -1;
     }
 
     // set listen queue for server
-    if (listen(server, SOMAXCONN) != 0) {
-        fprintf(stderr, "Failed to listen on server\n");
+    if (listen(server, SOMAXCONN)) {
+        fprintf(stderr, "[KDB] Failed to listen on server\n");
         close(server);
         return -1;
     }
 
     // set server to non blocking mode
-    if (kio_non_blocking(server) != 0) {
-        fprintf(stderr, "Failed to set server non blocking\n");
+    if (kio_non_blocking(server)) {
+        fprintf(stderr, "[KDB] Failed to set server non blocking\n");
         close(server);
         return -1;
     }
@@ -184,18 +241,213 @@ static int kio_server(const uint16_t port) {
     return server;
 }
 
-static void kio_process(kio_ctx_t *ctx, int *polled, int *wait_time, struct epoll_event *events) {
-    // TODO: task processing + epoll_wait
+static void kio_accept(kio_ctx_t *ctx, int server, struct epoll_event *event) {
+    int fd;
+    kio_client_t *client;
+    socklen_t client_len;
+    struct sockaddr client_addr;
+
+    // accept incoming clients
+    while (1) {
+        client_len = sizeof(client_addr);
+        fd = accept(server, &client_addr, &client_len);
+
+        // client valid fd
+        if (fd == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                break; // finished accepting all clients
+            fprintf(stderr, "[KDB] Failed to accept incoming client\n");
+            break;
+        }
+
+        // set client fd non blocking
+        if (kio_non_blocking(fd)) {
+            fprintf(stderr, "[KDB] Failed to set client non-blocking\n");
+            close(fd);
+            continue;
+        }
+
+        // create kio_client object for incoming fd
+        client = malloc(sizeof(kio_client_t));
+        if (client == NULL) {
+            fprintf(stderr, "[KDB] Not enough memory for k_client! closing client\n");
+            close(fd);
+            continue;
+        }
+
+        // prepare client
+        client->fd = fd;
+        client->ctx = ctx;
+        client->data = NULL;
+        client->next = NULL;
+        client->rtasks = NULL;
+        client->on_close = NULL;
+        kbuf_init(&client->rbuf);
+
+        // register client to epoll context
+        event->data.fd = fd;
+        event->data.ptr = client;
+        event->events = EPOLLIN | EPOLLET;
+        if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, fd, event) == -1) {
+            fprintf(stderr, "[KDB] Failed to register client\n");
+            kio_close(client);
+            continue;
+        }
+
+        // add to context
+        if (ctx->clients == NULL) {
+            ctx->clients = client;
+        } else {
+            kio_client_t *c = (kio_client_t*)ctx->clients;
+            while (c->next != NULL)
+                c = c->next;
+            c->next = client;
+        }
+        ctx->client_num++;
+
+        // call the context client-accept callback
+        if (ctx->accept_cb != NULL) {
+            kio_clientcb_t callback = (kio_clientcb_t)ctx->accept_cb;
+            callback(client);
+        }
+    }
 }
 
-void kio_run(kio_ctx_t *ctx, const uint16_t port) {
-    if (ctx == NULL) return;
+static int kio_process_and_poll(kio_ctx_t *ctx, struct epoll_event *events) {
+    if (ctx == NULL || ctx->closed) return -1;
+
+    // prepare variables
+    struct timeval tv;
+    int wait_time = -1;
+    uint64_t now, delay;
+    kio_task_t *task, *next;
+
+    // iterate through tasks
+    task = ctx->tasks;
+    while (task != NULL) {
+        now = k_now(&tv);
+
+        // a task is ready, update the ones around it, call it and free it
+        if (now >= task->expires) {
+            next = (kio_task_t*)task->next;
+            task->callback(task->data);
+            if (task->last != NULL) // make previous point to next
+                ((kio_task_t*)task->last)->next = next;
+            else if (task == ctx->tasks) // make root point to next
+                ctx->tasks = (kio_task_t*)ctx->tasks->next;
+            if (next != NULL) // make next's last (this) point to null
+                next->last = NULL;
+            // free and continue
+            free(task);
+            task = NULL;
+            task = next;
+
+        // task wasnt ready, but check if it should take priority in waiting
+        } else {
+            delay = task->expires - now;
+            if (wait_time < 0 || delay < wait_time)
+                wait_time = delay;
+            task = (kio_task_t*)task->next;
+        }
+    }
+
+    // poll for socket events given time to wait for tasks
+    return epoll_wait(ctx->epoll_fd, events, KIO_MAX_EVENTS, wait_time);
+}
+
+static inline int kio_is_err(int e) {
+    return ((e & EPOLLERR) || (e & EPOLLHUP) || (!(e & EPOLLIN))) ? 1 : 0;
+}
+
+int kio_run(kio_ctx_t *ctx, const uint16_t port) {
+    if (ctx == NULL) return -1;
 
     // create runtime variables
-    int i, wait_time, polled;
+    ssize_t n_read;
+    kio_client_t *client;
     struct epoll_event event;
+    int polled, running, server;
+    uint8_t read_buf[KIO_READ_SIZE];
     struct epoll_event events[KIO_MAX_EVENTS];
 
+    // create epoll context for ctx
+    ctx->epoll_fd = epoll_create1(0);
+    if (ctx->epoll_fd == -1) {
+        fprintf(stderr, "[KDB] Failed to create epoll context\n");
+        return -1;
+    }
 
+    // create server
+    server = kio_server(port);
+    if (server < 0)
+        return -1;
+
+    // register server to epoll instance
+    event.data.fd = server;
+    event.events  = EPOLLIN | EPOLLET;
+    if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, server, &event) == -1) {
+        fprintf(stderr, "[KDB] Failed to register server on epoll instance\n");
+        close(server);
+        return -1;
+    }
+
+    // start io server
+    running = 1;
+    printf("[KDB] Server started on %d\n", port);
+    while (!ctx->closed && running) {
+        polled = kio_process_and_poll(ctx, events);
+        if (polled < 0) break;
+        while (polled-- && running) {
+
+            // server event (either error or accept)
+            if (events[polled].data.fd == server) {
+                if (kio_is_err(events[polled].events))
+                    running = 0;
+                else
+                    kio_accept(ctx, server, &event);
+
+            // client event (either error or read event)
+            } else if (events[polled].events & EPOLLIN) {
+                client = (kio_client_t*)events[polled].data.ptr;
+
+                // handle client error
+                if (client == NULL || kio_is_err(events[polled].events)) {
+                    kio_close(client);
+                    continue;
+                }
+
+                // process read task
+                while (1) {
+                    n_read = read(client->fd, read_buf, KIO_READ_SIZE);
+                    if (n_read < 0) {
+                        if (errno != EAGAIN)
+                            kio_close(client);
+                        break;
+                    } else if (n_read == 0) {
+                        kio_close(client);
+                        break;
+                    } else {
+                        kbuf_write(&client->rbuf, read_buf, n_read);
+                    }
+                }
+
+                // process client read tasks
+                kio_rtask_t *next, *task = client->rtasks;
+                while (task != NULL) {
+                    if (client->rbuf.len - client->rbuf.pos < task->goal)
+                        break;
+                    next = (kio_rtask_t*)task->next;
+                    ((kio_readcb_t)task->callback)(client, &client->rbuf);
+                    free(task);
+                    task = NULL;
+                    task = next;
+                }
+            }
+        }
+    }
+
+    // free and return
+    kio_free(ctx);
+    return 0;
 }
     

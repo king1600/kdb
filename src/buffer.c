@@ -1,14 +1,8 @@
 #include "buffer.h"
+#include <stdlib.h>
 #include <string.h>
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
-
-typedef struct {
-    size_t pos;
-    size_t len;
-    size_t max;
-    uint8_t *data;
-} kbuf_t;
 
 void kbuf_init(kbuf_t *buf) {
     buf->pos = 0;
@@ -41,6 +35,7 @@ int kbuf_write(kbuf_t *buf, const uint8_t *data, const size_t size) {
 
     // first write, initialze buffer to size
     if (buf->data == NULL) {
+        buf->len = size;
         buf->max = size;
         buf->data = malloc(sizeof(buf->data) * buf->max);
         memcpy(buf->data, data, size);
