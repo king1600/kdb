@@ -2,4 +2,5 @@
 build/
 *.o
 *.d
+test.py
 __pycache__/
