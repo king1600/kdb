@@ -1,5 +1,5 @@
 #include "kdb.h"
-#include "ws.h"
+#include "io.h"
 #include <stdlib.h>
 #include <signal.h>
 
@@ -10,8 +10,8 @@ void kdb_sig_cleanup(int sig) {
     kio_free(kio_ctx);
 }
 
-void kdb_client(kws_client_t *client) {
-    printf("Accepted client\n");
+void test_callback(void *data) {
+    printf("Callback: %s\n", (const char*)data);
 }
 
 int main(int argc, char **argv) {
@@ -27,7 +27,12 @@ int main(int argc, char **argv) {
     act.sa_handler = kdb_sig_cleanup;
     sigaction(SIGINT, &act, NULL);
 
-    kws_init(kio_ctx, kdb_client);
+    if (kio_call(kio_ctx, 1000, "Hello world", test_callback))
+        printf("Failed creating task for hello world\n");
+    if (kio_call(kio_ctx, 2000, "How goes thou?", test_callback))
+        printf("Failed creating task for how goes thou\n");
+    if (kio_call(kio_ctx, 4000, "Pretty good", test_callback))
+        printf("Failed creating task for pretty good\n");
 
     if (kio_run(kio_ctx, KDB_SERVER_PORT))
         return EXIT_FAILURE;
