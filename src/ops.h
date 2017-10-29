@@ -2,7 +2,7 @@
 #define K_OP_H
 
 // data type sizes
-static const int
+static const size_t
     k_byte_s = sizeof(char),
     k_short_s = sizeof(short),
     k_int_s = sizeof(int),
