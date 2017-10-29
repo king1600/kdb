@@ -29,7 +29,7 @@ int kbuf_read(kbuf_t *buf, void *output, size_t size) {
     return 0;
 }
 
-int kbuf_write(kbuf_t *buf, const uint8_t *data, const size_t size) {
+int kbuf_write(kbuf_t *buf, const char *data, const size_t size) {
     if (buf == NULL)
         return -1;
     if (size == 0)
@@ -39,7 +39,7 @@ int kbuf_write(kbuf_t *buf, const uint8_t *data, const size_t size) {
     if (buf->data == NULL) {
         buf->len = size;
         buf->max = size;
-        buf->data = malloc(sizeof(buf->data) * buf->max);
+        buf->data = calloc(buf->max, sizeof(buf->data));
         memcpy(buf->data, data, size);
         return 0;
     }
@@ -55,6 +55,7 @@ int kbuf_write(kbuf_t *buf, const uint8_t *data, const size_t size) {
     if (buf->len + size > buf->max) {
         buf->max = (buf->len + size) * 12 / 10;
         buf->data = realloc(buf->data, buf->max);
+        memset(buf->data + buf->len, 0, buf->max - buf->len);
     }
 
     // write the data
