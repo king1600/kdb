@@ -1,23 +1,13 @@
 #include "ws.h"
 #include "sha1.h"
 #include "ws_parse.h"
+#include "ops.h"
+
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
-
-// websocket opcodes
-#define KWS_OP_CONT 0x00
-#define KWS_OP_TEXT 0x01
-#define KWS_OP_BIN 0x02
-#define KWS_OP_FIN 0x08
-#define KWS_OP_PING 0x09
-#define KWS_OP_PONG 0x0a
-
-// client states
-#define KWS_STATE_HANDSHAKE 0
-#define KWS_STATE_OPEN 1
-#define KWS_STATE_CLOSING 2
-#define KWS_STATE_CLOSED 3
+#include <endian.h>
+#include <arpa/inet.h>
 
 // data sizes
 #define WS_CLRF_SIZE 2
@@ -81,13 +71,12 @@ static const int kws_gen_key(const char *ckey, char *skey, const size_t csize) {
 }
 
 static void kws_client_close(kio_client_t *client) {
+    // close websocket client
     kws_client_t *ws = (kws_client_t*)client->data;
+    kbuf_free(&ws->fragment);
     free(ws);
     ws = NULL;
 }
-
-#define KWS_HANDSHAKE_UPGRADE 1
-#define KWS_HANDSHAKE_CONNECTION 2
 
 static void kws_handshake(kio_client_t *client) {
     size_t len, value_len, key_len;
@@ -146,6 +135,11 @@ static void kws_handshake(kio_client_t *client) {
     ws->state = KWS_STATE_OPEN;
     kws_start_parsing(ws);
 
+    // call accept for new ws client
+    kws_callback_t callback = (kws_callback_t)client->ctx->data;
+    if (callback != NULL)
+        callback(ws);
+
     // end of function
     return;
     invalid_request:
@@ -167,6 +161,7 @@ static void kws_accept(kio_client_t *client) {
     ws->client = client;
     ws->on_close = NULL;
     ws->on_message = NULL;
+    kbuf_init(&ws->fragment);
     ws->state = KWS_STATE_HANDSHAKE;
 
     // bind to client and read handshake
@@ -181,30 +176,88 @@ void kws_init(kio_ctx_t *ctx, kws_callback_t callback) {
     ctx->accept_cb = kws_accept;
 }
 
-void kws_on_close(kws_client_t *client, kws_close_t callback) {
-
+void kws_on_close(kws_client_t *ws, kws_close_t callback) {
+    ws->on_close = callback;
 }
 
-void kws_on_pong(kws_client_t *client, kws_callback_t callback) {
-
+void kws_on_pong(kws_client_t *ws, kws_data_t callback) {
+    ws->on_pong = callback;
 }
 
-void kws_on_message(kws_client_t *client, kws_callback_t callback) {
-
+void kws_on_message(kws_client_t *ws, kws_data_t callback) {
+    ws->on_message = callback;
 }
 
-void kws_send(kws_client_t *client, const char *data) {
-
+void kws_send(kws_client_t *ws, const char *data) {
+    if (ws->state == KWS_STATE_OPEN)
+        kws_send_raw(ws, data, strlen(data), KWS_OP_TEXT);
 }
 
-void kws_ping(kws_client_t *client, const char *data, const size_t len) {
-
+void kws_send_bin(kws_client_t *ws, const char* data, const size_t len) {
+    if (ws->state == KWS_STATE_OPEN)
+        kws_send_raw(ws, data, len, KWS_OP_BIN);
 }
 
-void kws_close(kws_client_t *client, const uint16_t code, const char *reason) {
-
+void kws_ping(kws_client_t *ws, const char *data, const size_t len) {
+    if (ws->state == KWS_STATE_OPEN)
+        kws_send_raw(ws, data, len, KWS_OP_PING);
 }
 
-void kws_send_bin(kws_client_t *client, const char* data, const size_t len) {
+void kws_close(kws_client_t *ws, const uint16_t code, const char *reason) {
 
+    // create close frame data
+    const size_t len = strlen(reason);
+    char *data = malloc((sizeof(char) * len) + k_short_s);
+    if (data == NULL) {
+        fprintf(stderr, "[KDB] Not enough memory for close frame!");
+        return;
+    }
+
+    // write close frame data
+    memcpy(data, &code, k_short_s);
+    memcpy(data + k_short_s, reason, len);
+
+    // send close frame
+    kws_send_raw(ws, data, len + k_short_s, KWS_OP_FIN);
+    free(data);
+    data = NULL;
+}
+
+void kws_send_raw(kws_client_t *ws, const char *data, const size_t len, const uint8_t opcode) {
+    size_t length;
+    uint8_t padding;
+    char *output;
+    
+    // calculate size padding
+    if (len < 126)
+        padding = 0;
+    else if (len < 65536)
+        padding = 2;
+    else
+        padding = 8;
+    
+    // create message data
+    length = 2 + len + padding;
+    output = malloc(sizeof(output) * length);
+    if (output == NULL) {
+        fprintf(stderr, "[KDB] Not enough memory for websocket frame");
+        return;
+    }
+
+    // write headers
+    output[0] = (1 << 7) | opcode;
+    output[1] = padding == 0 ? len : (padding == 2 ? 0x7e : 0x7f);
+    if (padding == 2) {
+        uint16_t size = htons(len);
+        memcpy(output + 2, &size, k_short_s);
+    } else if (padding == 8) {
+        uint64_t size =be64toh(len);
+        memcpy(output + 2, &size, k_long_s);
+    }
+
+    // write data
+    memcpy(output + 2 + padding, data, len);
+    kio_write(ws->client, output, length);
+    free(output);
+    output = NULL;
 }

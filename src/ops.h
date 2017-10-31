@@ -1,6 +1,8 @@
 #ifndef K_OP_H
 #define K_OP_H
 
+#include <stddef.h>
+
 // data type sizes
 static const size_t
     k_byte_s = sizeof(char),
