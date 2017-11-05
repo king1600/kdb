@@ -1,20 +1,15 @@
-import socket
+import asyncio
+import websockets
 
-data = \
-"GET / HTTP/1.1\r\n" + \
-"Host: example.com\r\n" + \
-"Upgrade: websocket\r\n" + \
-"Connection: upgrade\r\n" + \
-"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" + \
-"\r\n"
+PORT = 11011
 
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-s.connect(('localhost', 11011))
-s.send(data.encode())
+async def test():
+    url = "ws://localhost:" + str(PORT) + "/"
+    async with websockets.connect(url) as ws:
+        pass
 
-resp = s.recv(8192)
-print(resp.decode())
-
-
-
-s.close()
+try:
+    asyncio.get_event_loop().run_until_complete(test())
+except KeyboardInterrupt:
+    pass
+asyncio.get_event_loop().close()

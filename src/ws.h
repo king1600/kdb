@@ -41,7 +41,7 @@ typedef struct {
 
 typedef void (*kws_callback_t)(kws_client_t*);
 typedef void (*kws_data_t)(kws_client_t*, const char*, size_t);
-typedef void (*kws_close_t)(kws_client_t*, uint16_t, const char*);
+typedef void (*kws_close_t)(kws_client_t*, uint16_t, const char*, size_t);
 
 void kws_init(kio_ctx_t *ctx, kws_callback_t callback);
 

@@ -17,9 +17,9 @@ void kws_parse_header(kio_client_t *client) {
     kws_frame_t *frame = &((kws_client_t*)client->data)->frame;
 
     // parse frame header
-    const char *data = buf->data + buf->pos;
+    uint8_t *data = (uint8_t*)(buf->data + buf->pos);
     frame->fin      = (data[0] >> 7) & 1;
-    frame->opcode   = data[1] & 0x0F;
+    frame->opcode   = data[0] & 0x0F;
     frame->masked   = (data[1] >> 7) & 1;
     frame->data_len = data[1] & (~0x80);
     kbuf_read(buf, buf->data, 2);
@@ -56,7 +56,7 @@ void kws_parse_mask(kio_client_t *client) {
     kbuf_t *buf = &client->rbuf;
     kws_frame_t *frame = &((kws_client_t*)client->data)->frame;
 
-    memcpy(frame->mask, buf->data + buf->pos, 4);
+    frame->mask = buf->data + buf->pos;
     // kbuf_read(buf, buf->data, 4) // do not read because could rewrite mask
     kio_read(client, frame->data_len, kws_parse_content);
 }
@@ -71,7 +71,7 @@ void kws_parse_content(kio_client_t *client) {
     kws_frame_t *frame = &ws->frame;
 
     // get data and unmask it if needed
-    frame->data = buf->data + buf->pos;
+    frame->data = buf->data + buf->pos + (frame->masked ? 4 : 0);
     if (frame->masked && frame->mask != NULL)
         kws_mask(frame->mask, frame->data, frame->data_len);
 
@@ -79,7 +79,7 @@ void kws_parse_content(kio_client_t *client) {
     const int should_close = kws_process_frame(ws, frame);
     frame->data = NULL;
     frame->mask = NULL;
-    kbuf_read(buf, buf->data, frame->data_len);
+    kbuf_read(buf, buf->data, frame->data_len + 4);
 
     // close connection or continue reading
     if (should_close)
@@ -133,8 +133,15 @@ int kws_process_frame(kws_client_t *ws, kws_frame_t *frame) {
         // close frame was received
         case KWS_OP_FIN: {
             // client requested close
-            if (ws->state == KWS_STATE_OPEN)
+            if (ws->state == KWS_STATE_OPEN) {
                 kws_send_raw(ws, payload, payload_len, KWS_OP_FIN);
+                ws->state = KWS_STATE_CLOSED;
+            }
+            if (ws->on_close != NULL) {
+                uint8_t *data = (uint8_t*)frame->data;
+                kws_close_t callback = (kws_close_t)ws->on_close;
+                callback(ws, (data[0] << 8) | (data[1]), frame->data + 2, frame->data_len - 2);
+            }
             return 1;
             break;
         }

@@ -106,6 +106,8 @@ static void kws_handshake(kio_client_t *client) {
             value_len = pos - value;
             key_len = value - 2 - key;
             kws_tolower(key, key_len);
+
+            // perform function based on header
             if (!strncmp(key, "sec-websocket-key", 17) && kws_gen_key(value, skey, value_len))
                 goto invalid_request;
             kws_tolower(value, value_len);
@@ -221,6 +223,11 @@ void kws_close(kws_client_t *ws, const uint16_t code, const char *reason) {
     kws_send_raw(ws, data, len + k_short_s, KWS_OP_FIN);
     free(data);
     data = NULL;
+
+    // perform callback and close websocket
+    if (ws->on_close != NULL)
+        ((kws_close_t)ws->on_close)(ws, code, reason, len);
+    kio_close(ws->client);
 }
 
 void kws_send_raw(kws_client_t *ws, const char *data, const size_t len, const uint8_t opcode) {
